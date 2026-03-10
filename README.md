@@ -1,4 +1,4 @@
-# Agow (Another Whisper Wrapper)
+# Agow
 
 Agow is a macOS desktop application designed to capture your daily updates or thoughts via voice, transcribe the audio using an on-device Whisper model, convert those transcriptions into structured, professional reports using Google's Gemini AI, and finally sync the reports directly to Apple Notes.
 
@@ -35,3 +35,4 @@ Agow is a macOS desktop application designed to capture your daily updates or th
 3. Run `npm run dev` to start the application with Vite and Electron concurrently.
 4. _(Optional)_ Wait for the `whisper-cli` tool to be built for your machine, or navigate to `whisper.cpp` and `make` it.
 5. To package for production, run standard build commands (`npm run build`).
+
