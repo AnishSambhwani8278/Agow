@@ -246,7 +246,6 @@ Respond only with the requested structure.`;
     if (res.success) {
       setCurrentState(STATES.STRUCTURED_VIEW);
       setStructuredNote(res.text);
-      await fetch("https://api-for-agow.onrender.com/count")
     } else {
       setErrorMsg(`Gemini Error: ${res.error}`);
     }
