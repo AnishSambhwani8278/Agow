@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import RecordRTC from "recordrtc";
 import Settings from "./Settings.jsx";
 import "./index.css";
 
@@ -98,6 +97,9 @@ function App() {
   const [errorMsg, setErrorMsg] = useState("");
   const [audioStatus, setAudioStatus] = useState("idle");
   const recorderRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const processorRef = useRef(null);
+  const sourceRef = useRef(null);
 
   const words = text
     .trim()
@@ -146,14 +148,31 @@ function App() {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
         });
-        recorderRef.current = new RecordRTC(stream, {
-          type: "audio",
-          mimeType: "audio/wav",
-          recorderType: RecordRTC.StereoAudioRecorder,
-          desiredSampRate: 16000,
-          numberOfAudioChannels: 1,
-        });
-        recorderRef.current.startRecording();
+
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        window.ipcRenderer.send("whisper:startAudioStream");
+
+        processor.onaudioprocess = (e) => {
+          const inputData = e.inputBuffer.getChannelData(0);
+          const pcm16 = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            const s = Math.max(-1, Math.min(1, inputData[i]));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          window.ipcRenderer.send("whisper:appendAudioChunk", pcm16.buffer);
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        audioContextRef.current = audioContext;
+        processorRef.current = processor;
+        sourceRef.current = source;
+        recorderRef.current = stream; // Keep stream ref to stop tracks
+
         setAudioStatus("listening");
         setErrorMsg("");
       } catch (err) {
@@ -162,32 +181,31 @@ function App() {
       }
     } else if (audioStatus === "listening") {
       setAudioStatus("transcribing");
-      if (recorderRef.current) {
-        recorderRef.current.stopRecording(async () => {
-          const blob = recorderRef.current.getBlob();
-          const arrayBuffer = await blob.arrayBuffer();
 
-          // Release microphone tracks
-          const tracks = recorderRef.current.stream?.getTracks() || [];
-          tracks.forEach((track) => track.stop());
-          recorderRef.current.destroy();
-          recorderRef.current = null;
-
-          const res = await window.ipcRenderer.invoke(
-            "whisper:transcribeFile",
-            arrayBuffer,
-          );
-
-          if (res && res.success && res.text) {
-            setText((prev) => (prev + " " + res.text).trim());
-          } else if (res && !res.success) {
-            setErrorMsg(res.error || "Failed to transcribe audio.");
-          }
-          setAudioStatus("idle");
-        });
-      } else {
-        setAudioStatus("idle");
+      if (processorRef.current) processorRef.current.disconnect();
+      if (sourceRef.current) sourceRef.current.disconnect();
+      if (audioContextRef.current) {
+        if (audioContextRef.current.state !== "closed") {
+          await audioContextRef.current.close().catch(console.error);
+        }
       }
+
+      const tracks = recorderRef.current?.getTracks() || [];
+      tracks.forEach((track) => track.stop());
+
+      processorRef.current = null;
+      sourceRef.current = null;
+      audioContextRef.current = null;
+      recorderRef.current = null;
+
+      const res = await window.ipcRenderer.invoke("whisper:transcribeFile");
+
+      if (res && res.success && res.text) {
+        setText((prev) => (prev + " " + res.text).trim());
+      } else if (res && !res.success) {
+        setErrorMsg(res.error || "Failed to transcribe audio.");
+      }
+      setAudioStatus("idle");
     }
   };
 
@@ -246,6 +264,7 @@ Respond only with the requested structure.`;
     if (res.success) {
       setCurrentState(STATES.STRUCTURED_VIEW);
       setStructuredNote(res.text);
+      await fetch("https://api-for-agow.onrender.com/count")
     } else {
       setErrorMsg(`Gemini Error: ${res.error}`);
     }

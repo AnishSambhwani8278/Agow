@@ -181,6 +181,37 @@ ipcMain.handle("notes:sync", async (event, structuredNote) => {
 });
 
 let whisperProcess = null;
+let audioStreamFileStatus = null;
+
+ipcMain.on("whisper:startAudioStream", (event) => {
+  try {
+    const wavPath = path.join(app.getPath("temp"), "streaming_recording.wav");
+    if (fs.existsSync(wavPath)) {
+      fs.unlinkSync(wavPath);
+    }
+    const fd = fs.openSync(wavPath, "w+");
+    // Write 44 bytes dummy header
+    const dummyHeader = Buffer.alloc(44);
+    fs.writeSync(fd, dummyHeader);
+    audioStreamFileStatus = { fd, path: wavPath, dataLength: 0 };
+    console.log("Started audio stream at", wavPath);
+  } catch (err) {
+    console.error("Start Audio Stream Error:", err);
+  }
+});
+
+ipcMain.on("whisper:appendAudioChunk", (event, arrayBuffer) => {
+  if (audioStreamFileStatus) {
+    try {
+      const buffer = Buffer.from(arrayBuffer);
+      fs.writeSync(audioStreamFileStatus.fd, buffer);
+      audioStreamFileStatus.dataLength += buffer.length;
+      // console.log(`Appended chunk of ${buffer.length} bytes. Total so far: ${audioStreamFileStatus.dataLength}`);
+    } catch (err) {
+      console.error("Append Audio Chunk Error:", err);
+    }
+  }
+});
 
 ipcMain.handle("whisper:checkModel", () => {
   const modelPath = path.join(app.getPath("userData"), "whisper-models", "ggml-small.bin");
@@ -241,13 +272,37 @@ ipcMain.handle("whisper:downloadModel", async (event) => {
   }
 });
 
-ipcMain.handle("whisper:transcribeFile", async (event, arrayBuffer) => {
+ipcMain.handle("whisper:transcribeFile", async (event) => {
   try {
-    const tempWavPath = path.join(app.getPath("temp"), "recording.wav");
+    if (!audioStreamFileStatus) {
+      return { success: false, error: "No audio stream found." };
+    }
 
-    // Convert ArrayBuffer to Buffer and save
-    const buffer = Buffer.from(arrayBuffer);
-    fs.writeFileSync(tempWavPath, buffer);
+    const { fd, path: tempWavPath, dataLength } = audioStreamFileStatus;
+
+    // Write the real WAV header at the beginning
+    const header = Buffer.alloc(44);
+    header.write("RIFF", 0);
+    header.writeUInt32LE(36 + dataLength, 4);
+    header.write("WAVE", 8);
+    header.write("fmt ", 12);
+    header.writeUInt32LE(16, 16); // Subchunk1Size
+    header.writeUInt16LE(1, 20);  // AudioFormat (1=PCM)
+    header.writeUInt16LE(1, 22);  // NumChannels
+    header.writeUInt32LE(16000, 24); // SampleRate
+    header.writeUInt32LE(16000 * 2, 28); // ByteRate
+    header.writeUInt16LE(2, 32);  // BlockAlign
+    header.writeUInt16LE(16, 34); // BitsPerSample
+    header.write("data", 36);
+    header.writeUInt32LE(dataLength, 40);
+
+    // Write header at position 0
+    fs.writeSync(fd, header, 0, 44, 0);
+    fs.closeSync(fd);
+    
+    console.log(`Saved audio file to ${tempWavPath} with ${dataLength} bytes of PCM data.`);
+
+    audioStreamFileStatus = null;
 
     const isDev = !!VITE_DEV_SERVER_URL;
     const cliBin = isDev
@@ -287,18 +342,30 @@ ipcMain.handle("whisper:transcribeFile", async (event, arrayBuffer) => {
 
         // Clean up the text: remove ANSI, empty lines, and brackets
         const cleanText = fullText
-          .replace(/\[.*\]/g, "")
-          .replace(/\(.*?\)/g, "")
-          .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
-          .replace(/\[_UNRECOGNIZED_\]/g, "")
           .split('\n')
-          .map(line => line.trim())
+          .map(line => {
+            // Remove timestamps like [00:00:00.000 --> 00:00:10.000]
+            let cleaned = line.replace(/\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\]/g, "");
+            // Remove other bracketed texts
+            cleaned = cleaned.replace(/\[.*?\]/g, "");
+            // Remove parentheses
+            cleaned = cleaned.replace(/\(.*?\)/g, "");
+            // Remove ANSI color codes
+            cleaned = cleaned.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
+            return cleaned.trim();
+          })
           .filter(line => line.length > 0)
           .join(" ")
           .trim();
 
         if (fs.existsSync(tempWavPath)) {
           fs.unlinkSync(tempWavPath);
+        }
+
+        if (!cleanText && errorText) {
+          console.error("Whisper produced no text. Stderr:", errorText);
+          resolve({ success: false, error: "Whisper produced no text. Check console." });
+          return;
         }
 
         resolve({ success: true, text: cleanText });
